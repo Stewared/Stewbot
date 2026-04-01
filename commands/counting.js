@@ -479,13 +479,13 @@ module.exports = {
         const guildCounting = guild?.counting;
         if (!guildCounting?.active) return;
         // Counting edit handlers
-        if (guildCounting.channel === msg.channel.id&&guildCounting.lastValidCountMessageId === msg.id) {
+        if (guildCounting.channel === msg.channel.id && guildCounting.lastValidCountMessageId === msg.id) {
             try {
+                const expectedNum = Math.max(1, (guildCounting.nextNum ?? 1) - 1);
                 const reposted = await msg.channel.send(String(expectedNum));
                 await reposted.react("\u2705").catch(() => {});
-                await guildByObj(msg.guild, {
-                    "counting.lastValidCountMessageId": reposted.id
-                });
+                guildCounting.lastValidCountMessageId = reposted.id;
+                await guild.save();
             }
             catch {}
         }
@@ -497,13 +497,13 @@ module.exports = {
         // Resend if the latest counting number was deleted
         if (guildCounting?.active && guildCounting.lastValidCountMessageId === msg.id) {
             try {
+                const expectedNum = Math.max(1, (guildCounting.nextNum ?? 1) - 1);
                 const reposted = await msg.channel.send(String(expectedNum));
                 await reposted.react("\u2705").catch(() => {});
-                await guildByObj(msg.guild, {
-                    "counting.lastValidCountMessageId": reposted.id
-                });
+                guildCounting.lastValidCountMessageId = reposted.id;
+                await guild.save();
             }
-            catch {}
+            catch { }
         }
     }
 };

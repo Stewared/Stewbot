@@ -24,7 +24,7 @@ const cache = {}; // TODO: lru cache
 const CROSS_CHANNEL_WINDOW_MS = ms("10s");
 const SAME_CONTENT_CROSS_CHANNEL_THRESHOLD = 3;
 const ATTACHMENT_ONLY_CROSS_CHANNEL_THRESHOLD = 3;
-const DANGER_KEYWORDS = ["@everyone", "@here", "http"];
+const DANGER_KEYWORDS = ["@everyone", "@here", "http", "discordapp", "discord.gg", "discord.com"];
 
 /**
  * Returns true when message content includes any high-risk spam indicator.

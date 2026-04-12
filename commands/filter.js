@@ -65,6 +65,39 @@ function defangURL(message) {
     });
 }
 
+function normalizeFilterWord(word) {
+    return String(word || "")
+        .replace(/\r/g, "")
+        .trim();
+}
+
+function splitLegacyFilterEntry(entry) {
+    return String(entry || "")
+        .split(/\n+/)
+        .map(normalizeFilterWord)
+        .filter(Boolean);
+}
+
+function buildBlockedWordRegex(blockedWord) {
+    let word = Array.from(blockedWord, char => {
+        const mappedChar = leetMap[char.toLowerCase()];
+        return mappedChar || escapeRegex(char);
+    }).join("");
+
+    if (blockedWord.length > 3) {
+        word += "(ing|s|ed|er|ism|ist|es|ual)?";
+    }
+
+    return new RegExp(`(\\b|^)${word}(\\b|$)`, "ig");
+}
+
+function parseImportedFilterWords(dataText) {
+    return dataText
+        .split(/[\r\n,]+/)
+        .map(normalizeFilterWord)
+        .filter(Boolean);
+}
+
 /** @deprecated Use `censor()` or `isDirty()` instead */
 const checkDirty = async function(guildID, what, filter = false, applyGlobalFilter = false) { // This function is important enough we can make it global
     // If filter is false, it returns: hasBadWords
@@ -111,51 +144,37 @@ const checkDirty = async function(guildID, what, filter = false, applyGlobalFilt
         blacklist = guildID;
     }
 
-    if (blacklist) for (let blockedWord of blacklist) {
+    if (blacklist) for (const rawBlockedWord of blacklist) {
         // Ignore the new beta json format for now
-        if (typeof(blockedWord) !== "string") {
+        if (typeof(rawBlockedWord) !== "string") {
             continue;
         }
 
-        // Unsnowflake blocked word to match unsnowflaked message
-        blockedWord = blockedWord.replace(/<:(\w+):[0-9]+>/g, ":$1:");
+        for (let blockedWord of splitLegacyFilterEntry(rawBlockedWord)) {
+            // Unsnowflake blocked word to match unsnowflaked message
+            blockedWord = blockedWord.replace(/<:(\w+):[0-9]+>/g, ":$1:");
 
-        let blockedWordRegex;
-        try {
-            let word = escapeRegex(blockedWord);
+            let blockedWordRegex;
+            try {
+                blockedWordRegex = buildBlockedWordRegex(blockedWord);
+            }
+            catch (e) {
+                // This should only ever be hit on old servers that have invalid regex before the escapeRegex was implemented
+                if (!e?.message?.includes?.("http")) notify("Caught filter error:\n" + JSON.stringify(e.message) + "\n" + e.stack);
+                // We can ignore this filter word
+                continue;
+            }
 
-            // More flexible matching
-            if (word.length > 3) {
-                for (let key in leetMap) { // Leet processing
-                    if (Object.prototype.hasOwnProperty.call(leetMap, key)) {
-                        const replacement = leetMap[key];
-                        word = word.replaceAll(key, replacement);
-                    }
+            // Check for the word
+            if (blockedWordRegex.test(what) || what === blockedWord) {
+                dirty = true;
+                if (!filter) {
+                    return true;
                 }
-
-                // This rule needs a ton more work, things like '(A|4|@|\\()\\(B\\|C\\+\\)\\+D' break it
-                // word = word.replace(/(?:\\\S)|(?:\([^()]+\))|./g, '$1.{0,1}');
-
-                word = word + "(ing|s|ed|er|ism|ist|es|ual)?"; // match variations
-            }
-            blockedWordRegex = new RegExp(`(\\b|^)${word}(\\b|$)`, "ig");
-        }
-        catch (e) {
-            // This should only ever be hit on old servers that have invalid regex before the escapeRegex was implemented
-            if (!e?.message?.includes?.("http")) notify("Caught filter error:\n" + JSON.stringify(e.message) + "\n" + e.stack);
-            // We can ignore this filter word
-            continue;
-        }
-
-        // Check for the word
-        if (blockedWordRegex.test(what) || what === blockedWord) {
-            dirty = true;
-            if (!filter) {
-                return true;
-            }
-            else {
-                foundWords.push(blockedWord);
-                what = what.replace(blockedWordRegex, "[\\_]");
+                else {
+                    foundWords.push(blockedWord);
+                    what = what.replace(blockedWordRegex, "[\\_]");
+                }
             }
         }
     }
@@ -405,7 +424,8 @@ module.exports = {
     async execute(cmd, context) {
         applyContext(context);
 
-        const word = cmd.options.getString("word");
+        const rawWord = cmd.options.getString("word");
+        const word = normalizeFilterWord(rawWord);
 
         const guild = await guildByObj(cmd.guild);
 
@@ -417,6 +437,11 @@ module.exports = {
         switch (cmd.options.getSubcommand()) {
 
             case "add":
+                if (!word || /[\r\n]/.test(rawWord || "")) {
+                    cmd.followUp("Please provide one word or phrase at a time.");
+                    break;
+                }
+
                 if (guild.filter.blacklist.includes(word)) {
                     cmd.followUp({
                         "ephemeral": true,
@@ -487,6 +512,11 @@ module.exports = {
                 break;
 
             case "remove":
+                if (!word || /[\r\n]/.test(rawWord || "")) {
+                    cmd.followUp("Please provide one word or phrase at a time.");
+                    break;
+                }
+
                 if (guild.filter.blacklist.includes(word)) {
                     guild.filter.blacklist.splice(guild.filter.blacklist.indexOf(word), 1);
                     cmd.followUp(`Alright, I have removed ||${word}|| from the filter.`);
@@ -550,12 +580,12 @@ module.exports = {
                 try {
                     const data = await fetch(attachmentURL);
                     const dataText = await data.text();
-                    var badWords = dataText.split(",");
+                    const badWords = [...new Set(parseImportedFilterWords(dataText))];
                     let addedWords = [];
-                    badWords.forEach(word => {
-                        if (!guild.filter.blacklist.includes(word)) {
-                            guild.filter.blacklist.push(word);
-                            addedWords.push(word);
+                    badWords.forEach(importedWord => {
+                        if (!guild.filter.blacklist.includes(importedWord)) {
+                            guild.filter.blacklist.push(importedWord);
+                            addedWords.push(importedWord);
                         }
                     });
                     await cmd.followUp(addedWords.length > 0 ? limitLength(`Added the following words to the blacklist:\n- ||${addedWords.join("||\n- ||")}||`) : `Unable to add any of the words to the filter. Either there aren't any in the CSV, it's not formatted right, or all of the words are in the blacklist already.`);

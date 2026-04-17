@@ -2,7 +2,7 @@
 const Categories = require("./modules/Categories");
 const client = require("../client.js");
 const { ConfigDB } = require("./modules/database.js");
-const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ChannelType } = require("discord.js");
+const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ChannelType, Events } = require("discord.js");
 function applyContext(context = {}) {
     for (let key in context) {
         this[key] = context[key];
@@ -21,6 +21,9 @@ const { notify } = require("../utils");
 const RSSParser = require("rss-parser");
 var turndown = new Turndown();
 const cheerio = require("cheerio");
+const RSS_CHECK_INTERVAL_MS = 60000 * 10;
+let rssCheckInProgress = false;
+let rssPollingStarted = false;
 
 // Setup RSS parser
 const rssParser = new RSSParser({
@@ -122,117 +125,155 @@ const fetchWithRedirectCheck = async (inputUrl, maxRedirects = 5) => {
     throw new Error("Too many redirects");
 };
 async function checkRSS() {
-    const config = await ConfigDB.findOne({});
+    if (rssCheckInProgress) {
+        return;
+    }
 
-    for (const feedHash of config.rss.keys()) {
+    rssCheckInProgress = true;
 
-        const feed = config.rss.get(feedHash);
-
-        if (feed.channels.length === 0) {
-            config.rss.delete(feedHash);
+    try {
+        const config = await ConfigDB.findOne({});
+        if (!config) {
+            return;
         }
-        else {
-            var cont = true;
-            var parsed;
-            try {
-                // Get the URL myself to prevent local IP redirects
-                const data = await (await fetchWithRedirectCheck(feed.url)).text();
-                parsed = await rssParser.parseString(data);
-                feed.fails = 0;
+
+        for (const feedHash of config.rss.keys()) {
+
+            const feed = config.rss.get(feedHash);
+
+            if (feed.channels.length === 0) {
+                config.rss.delete(feedHash);
             }
-            catch {
-                cont = false;
+            else {
+                var cont = true;
+                var parsed;
+                try {
+                    // Get the URL myself to prevent local IP redirects
+                    const data = await (await fetchWithRedirectCheck(feed.url)).text();
+                    parsed = await rssParser.parseString(data);
+                    feed.fails = 0;
+                }
+                catch {
+                    cont = false;
 
-                // Track fails
-                feed.fails++;
+                    // Track fails
+                    feed.fails++;
 
-                // Remove failing URLs
-                if (feed.fails > 7) {
-                    config.rss.delete(feedHash);
+                    // Remove failing URLs
+                    if (feed.fails > 7) {
+                        config.rss.delete(feedHash);
+                    }
+                }
+                if (cont) {
+                    let lastSentDate = new Date(feed.lastSent);
+                    let mostRecentArticle = lastSentDate;
+
+                    for (let item of parsed.items.reverse()) {
+                        let thisArticleDate = new Date(item.isoDate);
+                        if (lastSentDate < thisArticleDate) {
+                            // Keep track of most recent
+                            if (mostRecentArticle < thisArticleDate) {
+                                mostRecentArticle = thisArticleDate;
+                            }
+
+                            // Parse before sending to each channel
+                            try {
+                                // Extract theoretically required fields per https://www.rssboard.org/rss-specification
+                                const link = item.link || parsed.link; // default to channel URL
+                                let baseUrl = "";
+                                if (link) { // Attempt to get baseURL for turndown parsing
+                                    try {
+                                        baseUrl = new URL(link).origin;
+                                    }
+                                    catch {
+                                        baseUrl = ""; // fallback if URL is invalid
+                                    }
+                                }
+
+                                let parsedDescription = turndown.turndown(item.description?.replace?.(/href="\/(.*?)"/g, `href="${(baseUrl)}/$1"`) || "");
+                                let content =  parsedDescription || item.contentSnippet || turndown.turndown(item.content || "") || "No Summary Available";
+                                content = content.replace(/&quot;/g, '"')
+                                    .replace(/&amp;/g, "&")
+                                    .replace(/&lt;/g, "<")
+                                    .replace(/&gt;/g, ">");
+
+                                const embed = new EmbedBuilder()
+                                    .setColor(0x5faa66)
+                                    .setTitle(limitLength(item.title || parsed.description || "No Title", 256)) // If no title, grab the feed description
+                                    .setDescription(limitLength(content, 1000));
+                                if (link) embed.setURL(link);
+
+                                // Optional fields
+                                const creator = item.creator || item["dc:creator"] || parsed.title || "Unknown Creator"; //
+                                // @ts-ignore - optional chaining
+                                const imageUrl = item?.image?.url || parsed?.image?.url;
+                                if (creator) embed.setAuthor({ name: creator });
+                                if (imageUrl) embed.setThumbnail(imageUrl);
+
+                                // If the description has an image, attempt to load it as a large image (image *fields* are usually thumbnails / logos)
+                                const $ = cheerio.load(item.description || "");
+                                const contentImage = $("img").attr("src");
+                                if (contentImage) embed.setImage(contentImage);
+
+                                // Send this feed to everyone following it
+                                for (let channelId of feed.channels) {
+                                    let channel = client.channels.cache.get(channelId);
+                                    if (channel === undefined || channel === null || !channel.isSendable()) {
+                                        feed.channels.splice(feed.channels.indexOf(channelId), 1);
+                                    }
+                                    else {
+                                        try {
+                                            channel.send({
+                                                content: `-# New notification from [a followed RSS feed](${item.link})`,
+                                                embeds: [embed]
+                                            });
+                                        }
+                                        catch (e) {
+                                            notify("RSS channel error: " + e.message + "\n" + e.stack);
+                                        }
+                                    }
+                                }
+                            }
+                            catch (e) {
+                                notify("RSS feed error: " + e.message + "\n" + e.stack);
+                            }
+                        }
+                    };
+                    // Update feed most recent now after sending all new ones since last time
+                    feed.lastSent = mostRecentArticle;
                 }
             }
-            if (cont) {
-                let lastSentDate = new Date(feed.lastSent);
-                let mostRecentArticle = lastSentDate;
+        };
 
-                for (let item of parsed.items.reverse()) {
-                    let thisArticleDate = new Date(item.isoDate);
-                    if (lastSentDate < thisArticleDate) {
-                        // Keep track of most recent
-                        if (mostRecentArticle < thisArticleDate) {
-                            mostRecentArticle = thisArticleDate;
-                        }
+        await config.save();
+    }
+    catch (e) {
+        notify("RSS scheduler error: " + e.message + "\n" + e.stack);
+    }
+    finally {
+        rssCheckInProgress = false;
+    }
+}
 
-                        // Parse before sending to each channel
-                        try {
-                            // Extract theoretically required fields per https://www.rssboard.org/rss-specification
-                            const link = item.link || parsed.link; // default to channel URL
-                            let baseUrl = "";
-                            if (link) { // Attempt to get baseURL for turndown parsing
-                                try {
-                                    baseUrl = new URL(link).origin;
-                                }
-                                catch {
-                                    baseUrl = ""; // fallback if URL is invalid
-                                }
-                            }
+function startRSSPolling() {
+    if (rssPollingStarted) {
+        return;
+    }
 
-                            let parsedDescription = turndown.turndown(item.description?.replace?.(/href="\/(.*?)"/g, `href="${(baseUrl)}/$1"`) || "");
-                            let content =  parsedDescription || item.contentSnippet || turndown.turndown(item.content || "") || "No Summary Available";
-                            content = content.replace(/&quot;/g, '"')
-                                .replace(/&amp;/g, "&")
-                                .replace(/&lt;/g, "<")
-                                .replace(/&gt;/g, ">");
+    rssPollingStarted = true;
+    void checkRSS();
+    setInterval(() => {
+        void checkRSS();
+    }, RSS_CHECK_INTERVAL_MS);
+}
 
-                            const embed = new EmbedBuilder()
-                                .setColor(0x5faa66)
-                                .setTitle(limitLength(item.title || parsed.description || "No Title", 256)) // If no title, grab the feed description
-                                .setDescription(limitLength(content, 1000));
-                            if (link) embed.setURL(link);
-
-                            // Optional fields
-                            const creator = item.creator || item["dc:creator"] || parsed.title || "Unknown Creator"; //
-                            // @ts-ignore - optional chaining
-                            const imageUrl = item?.image?.url || parsed?.image?.url;
-                            if (creator) embed.setAuthor({ name: creator });
-                            if (imageUrl) embed.setThumbnail(imageUrl);
-
-                            // If the description has an image, attempt to load it as a large image (image *fields* are usually thumbnails / logos)
-                            const $ = cheerio.load(item.description || "");
-                            const contentImage = $("img").attr("src");
-                            if (contentImage) embed.setImage(contentImage);
-
-                            // Send this feed to everyone following it
-                            for (let channelId of feed.channels) {
-                                let channel = client.channels.cache.get(channelId);
-                                if (channel === undefined || channel === null || !channel.isSendable()) {
-                                    feed.channels.splice(feed.channels.indexOf(channelId), 1);
-                                }
-                                else {
-                                    try {
-                                        channel.send({
-                                            content: `-# New notification from [a followed RSS feed](${item.link})`,
-                                            embeds: [embed]
-                                        });
-                                    }
-                                    catch (e) {
-                                        notify("RSS channel error: " + e.message + "\n" + e.stack);
-                                    }
-                                }
-                            }
-                        }
-                        catch (e) {
-                            notify("RSS feed error: " + e.message + "\n" + e.stack);
-                        }
-                    }
-                };
-                // Update feed most recent now after sending all new ones since last time
-                feed.lastSent = mostRecentArticle;
-            }
-        }
-    };
-
-    await config.save();
+if (client.isReady()) {
+    startRSSPolling();
+}
+else {
+    client.once(Events.ClientReady, () => {
+        startRSSPolling();
+    });
 }
 
 /** @type {import("../command-module").CommandModule} */
@@ -297,7 +338,7 @@ module.exports = {
                 helpCategories: [Categories.Information, Categories.Configuration, Categories.Administration, Categories.Server_Only],
                 shortDesc: "Follow an RSS feed", //Should be the same as the command setDescription field
                 detailedDesc: //Detailed on exactly what the command does and how to use it
-					`Specify a channel and an RSS feed, and every day at noon UTC, Stewbot will post any updated from that feed into the channel.`
+					`Specify a channel and an RSS feed, and Stewbot will check that feed every 10 minutes and post any new updates into the channel.`
             },
             unfollow: {
                 helpCategories: [Categories.Configuration, Categories.Administration, Categories.Server_Only],
@@ -447,6 +488,6 @@ module.exports = {
     async daily(context) {
         applyContext(context);
 
-        checkRSS();
+        void checkRSS();
     }
 };

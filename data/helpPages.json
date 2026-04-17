@@ -641,7 +641,7 @@
             "Server_Only"
         ],
         "shortDesc": "Follow an RSS feed",
-        "detailedDesc": "Specify a channel and an RSS feed, and every day at noon UTC, Stewbot will post any updated from that feed into the channel."
+        "detailedDesc": "Specify a channel and an RSS feed, and Stewbot will check that feed regularly and post any new updates into the channel."
     },
     {
         "name": "rss unfollow",

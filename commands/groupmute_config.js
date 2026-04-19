@@ -13,6 +13,17 @@ function applyContext(context = {}) {
 
 const { getEmojiFromMessage, parseEmoji } = require("./emojiboard");
 
+function getDefaultGroupmuteBoard() {
+    return {
+        active: false,
+        threshold: 5,
+        length: 60000 * 5,
+        isMute: true,
+        posters: new Map(),
+        posted: new Map()
+    };
+}
+
 /** @type {import("../command-module").CommandModule} */
 module.exports = {
     data: {
@@ -76,48 +87,58 @@ module.exports = {
         const guild = await guildByObj(cmd.guild);
 
         const oldEmoji = guild.groupmute;
+        const existingTargetBoard = guild.emojiboards.get(emoji);
+
+        // Keep regular emojiboards and groupmute data separate.
+        if (existingTargetBoard && !existingTargetBoard.isMute && oldEmoji !== emoji) {
+            cmd.followUp("That emoji is already in use for an emojiboard. Pick a different emoji or remove that emojiboard first.");
+            return;
+        }
 
 
         // If just moving to a different emoji
         if (oldEmoji && oldEmoji !== emoji) {
-            // If the emoji is different than it already was,
-            // delete the emojiboard for it since we are gonna store the groupmute there
+            const oldBoard = guild.emojiboards.get(oldEmoji);
 
-            // Set new one
-            guild.emojiboards.set(
-                emoji,
-                guild.emojiboards.get(oldEmoji)
-            );
+            // If the old board is groupmute, carry it over to the new emoji.
+            if (oldBoard?.isMute && !guild.emojiboards.has(emoji)) {
+                guild.emojiboards.set(emoji, oldBoard);
+            }
 
-            // Delete the old one
-            guild.emojiboards.delete(oldEmoji);
+            // Only delete the old board if it was actually the mute board.
+            if (oldBoard?.isMute) {
+                guild.emojiboards.delete(oldEmoji);
+            }
         }
+
         if (!guild.emojiboards.has(emoji)) {
-            guild.emojiboards.set(emoji, {
-                active: false,
-                threshold: 5,
-                length: 60000 * 5,
-                isMute: true,
-                posters: new Map(),
-                posted: new Map()
-            });
+            guild.emojiboards.set(emoji, getDefaultGroupmuteBoard());
         }
 
-        guild.emojiboards.get(emoji).active = cmd.options.getBoolean("active");
+        const board = guild.emojiboards.get(emoji);
+
+        // Repair older mixed records that may have lost mute flags.
+        board.isMute = true;
+        if (typeof board.threshold !== "number" || board.threshold < 1) board.threshold = 5;
+        if (typeof board.length !== "number" || board.length < 1) board.length = 60000 * 5;
+        if (!board.posters) board.posters = new Map();
+        if (!board.posted) board.posted = new Map();
+
+        board.active = cmd.options.getBoolean("active");
         guild.groupmute = emoji;
 
         if (cmd.options.getInteger("threshold") !== null)
-            guild.emojiboards.get(emoji).threshold = cmd.options.getInteger("threshold");
+            board.threshold = cmd.options.getInteger("threshold");
 
         if (cmd.options.getInteger("mute_length") !== null)
-            guild.emojiboards.get(emoji).length = cmd.options.getInteger("mute_length");
+            board.length = cmd.options.getInteger("mute_length");
 
         await guild.save();
 
         cmd.followUp(
             `Alright, I have configured groupmute.${
                 cmd.options.getBoolean("active")
-                    ? ` If ${parseEmoji(emoji)} is reacted ${guild.emojiboards.get(emoji).threshold} times, I'll mute the author of the message.`
+                    ? ` If ${parseEmoji(emoji)} is reacted ${board.threshold} times, I'll mute the author of the message.`
                     : ``
             }`
         );

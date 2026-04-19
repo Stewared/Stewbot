@@ -3,6 +3,7 @@ const Categories = require("./modules/Categories");
 const client = require("../client.js");
 const { Guilds, guildByID, guildByObj } = require("./modules/database.js");
 const { Events, InteractionContextType: IT, ApplicationIntegrationType: AT, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ChannelType } = require("discord.js");
+const ms = require("ms");
 function applyContext(context = {}) {
     for (let key in context) {
         this[key] = context[key];
@@ -64,7 +65,7 @@ async function doEmojiboardReaction(react) {
 
     const emoji = getEmojiFromMessage(
         react.emoji.requiresColons ?
-            `<:${react.emoji.name}:${react.emoji.id}>` :
+            react.emoji.toString() :
             react.emoji.name
     );
 
@@ -76,9 +77,18 @@ async function doEmojiboardReaction(react) {
 
     const emojiboard = emojiboards.get(emoji);
     if (!emojiboard.active) return;
+    const isGroupmute = emojiboard.isMute || guild.groupmute === emoji;
+
+    if (!emojiboard.posted) {
+        emojiboard.posted = new Map();
+    }
+
+    if (isGroupmute && emojiboard.posted.has(react.message.id)) {
+        return;
+    }
 
     // Exit conditions
-    if (!emojiboard.isMute) {
+    if (!isGroupmute) {
         // exit if this message has already been posted
         if (emojiboard.posted.has(react.message.id)) return;
 
@@ -95,7 +105,7 @@ async function doEmojiboardReaction(react) {
         return;
     }
 
-    if (emojiboard.isMute) {
+    if (isGroupmute) {
         var member = messageData.guild.members.cache.get(messageData.author.id);
         if (member === null || member === undefined) {
             member = await messageData.guild.members.fetch(messageData.author.id);
@@ -103,13 +113,41 @@ async function doEmojiboardReaction(react) {
         if (member === null || member === undefined) {
             return;
         }
-        if (!member.bannable || !messageData.guild.members.cache.get(client.user.id).permissions.has(PermissionFlagsBits.ModerateMembers) || member.bot || member.permissions.has(PermissionFlagsBits.Administrator)) {
+
+        var botMember = messageData.guild.members.cache.get(client.user.id);
+        if (botMember === null || botMember === undefined) {
+            botMember = await messageData.guild.members.fetch(client.user.id).catch(() => null);
+        }
+
+        if (!member.moderatable || !botMember?.permissions.has(PermissionFlagsBits.ModerateMembers) || member.bot || member.permissions.has(PermissionFlagsBits.Administrator)) {
             return;
         }
-        try {
-            member.timeout(emojiboard.length, `I was configured with /groupmute_config to do so.`).catch(() => { });
+
+        const timeoutLength = typeof emojiboard.length === "number" && emojiboard.length > 0
+            ? emojiboard.length
+            : 60000 * 5;
+
+        if (member.communicationDisabledUntilTimestamp > Date.now()) {
+            return;
         }
-        catch { }
+
+        const timeoutApplied = await member.timeout(timeoutLength, `I was configured with /groupmute_config to do so.`)
+            .then(() => true)
+            .catch(() => false);
+
+        if (!timeoutApplied) {
+            return;
+        }
+
+        const durationText = ms(timeoutLength, { long: true }) || `${Math.round(timeoutLength / 1000)} seconds`;
+        const replyMessage = await messageData.reply({
+            content: `This user has been crowdmuted on this message for ${durationText}.`,
+            allowedMentions: { parse: [] }
+        }).catch(() => null);
+
+        emojiboard.posted.set(react.message.id, replyMessage?.id || react.message.id);
+        await guild.save();
+
         return;//If it's a groupmute, don't bother with emojiboard stuff.
     }
 
@@ -158,12 +196,12 @@ async function doEmojiboardReaction(react) {
             if (!fallbackChannel || !fallbackChannel.isTextBased?.()) return;
             if (!("createWebhook" in fallbackChannel)) return;
 
-            const hook = await fallbackChannel.createWebhook({
+            const fallbackHook = await fallbackChannel.createWebhook({
                 name: config.name,
                 avatar: config.pfp
             });
 
-            let response = await hook.send({
+            let response = await fallbackHook.send({
                 ...resp,
                 allowedMentions: { parse: [] }
             });
@@ -508,6 +546,8 @@ module.exports = {
 
         postToRedact.forEach(async ({ emoji, board }) => {
             if (emoji) {
+                if (board?.isMute || !board?.channel) return;
+
                 try {
                     const channel = await client.channels.fetch(board.channel);
                     if (!channel?.isTextBased?.()) return;

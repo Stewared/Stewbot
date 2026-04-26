@@ -126,6 +126,13 @@ async function doEmojiboardReaction(react) {
         const timeoutLength = typeof emojiboard.length === "number" && emojiboard.length > 0
             ? emojiboard.length
             : 60000 * 5;
+        const crowdmuteTTL = typeof emojiboard.ttl === "number" && emojiboard.ttl >= 0
+            ? emojiboard.ttl
+            : 60000 * 5;
+
+        if (crowdmuteTTL > 0 && (Date.now() - messageData.createdTimestamp) > crowdmuteTTL) {
+            return;
+        }
 
         if (member.communicationDisabledUntilTimestamp > Date.now()) {
             return;

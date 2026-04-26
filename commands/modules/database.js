@@ -156,7 +156,8 @@ let emojiboardSchema = new mongoose.Schema({
     posted: { type: Map, of: String, default: {} }, // A record of the original message ID for us to delete
     posters: { type: Map, of: Number, default: {} }, // List of poster IDs mapped to how many posts they have
     isMute: { type: Boolean, default: false },
-    length: { type: Number } // Length of timeout from groupmute "emojiboard"
+    length: { type: Number }, // Length of timeout from groupmute "emojiboard"
+    ttl: { type: Number } // Age limit for crowdmute-eligible messages (0 disables)
 });
 
 let warningSchema = new mongoose.Schema({

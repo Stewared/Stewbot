@@ -3,6 +3,7 @@ const Categories = require("./modules/Categories");
 const client = require("../client.js");
 const { guildByObj } = require("./modules/database.js");
 const { SlashCommandBuilder, PermissionFlagsBits } = require("discord.js");
+const ms = require("ms");
 function applyContext(context = {}) {
     for (let key in context) {
         this[key] = context[key];
@@ -13,11 +14,15 @@ function applyContext(context = {}) {
 
 const { getEmojiFromMessage, parseEmoji } = require("./emojiboard");
 
+const DEFAULT_GROUPMUTE_LENGTH_MS = 60000 * 5;
+const DEFAULT_GROUPMUTE_TTL_MS = 60000 * 5;
+
 function getDefaultGroupmuteBoard() {
     return {
         active: false,
         threshold: 5,
-        length: 60000 * 5,
+        length: DEFAULT_GROUPMUTE_LENGTH_MS,
+        ttl: DEFAULT_GROUPMUTE_TTL_MS,
         isMute: true,
         posters: new Map(),
         posted: new Map()
@@ -50,6 +55,17 @@ module.exports = {
                         { name: "10 min", value: 600000 },
                         { name: "1 hour", value: 60000 * 60 },
                         { name: "1 day", value: 60000 * 60 * 24 }
+                    )
+            )
+            .addIntegerOption(option =>
+                option.setName("message_ttl").setDescription("Only mute messages newer than this. (Default: 5 mins)")
+                    .addChoices(
+                        { name: "Disabled", value: 0 },
+                        { name: "1 min", value: 60000 },
+                        { name: "5 min", value: 60000 * 5 },
+                        { name: "10 min", value: 60000 * 10 },
+                        { name: "30 min", value: 60000 * 30 },
+                        { name: "1 hour", value: 60000 * 60 }
                     )
             )
             .addBooleanOption(option =>
@@ -120,7 +136,8 @@ module.exports = {
         // Repair older mixed records that may have lost mute flags.
         board.isMute = true;
         if (typeof board.threshold !== "number" || board.threshold < 1) board.threshold = 5;
-        if (typeof board.length !== "number" || board.length < 1) board.length = 60000 * 5;
+        if (typeof board.length !== "number" || board.length < 1) board.length = DEFAULT_GROUPMUTE_LENGTH_MS;
+        if (typeof board.ttl !== "number" || board.ttl < 0) board.ttl = DEFAULT_GROUPMUTE_TTL_MS;
         if (!board.posters) board.posters = new Map();
         if (!board.posted) board.posted = new Map();
 
@@ -133,12 +150,19 @@ module.exports = {
         if (cmd.options.getInteger("mute_length") !== null)
             board.length = cmd.options.getInteger("mute_length");
 
+        if (cmd.options.getInteger("message_ttl") !== null)
+            board.ttl = cmd.options.getInteger("message_ttl");
+
+        const ttlText = board.ttl === 0
+            ? "Message age TTL is disabled."
+            : `Only messages newer than ${ms(board.ttl, { long: true })} can be crowdmuted.`;
+
         await guild.save();
 
         cmd.followUp(
             `Alright, I have configured groupmute.${
                 cmd.options.getBoolean("active")
-                    ? ` If ${parseEmoji(emoji)} is reacted ${board.threshold} times, I'll mute the author of the message.`
+                    ? ` If ${parseEmoji(emoji)} is reacted ${board.threshold} times, I'll mute the author of the message. ${ttlText}`
                     : ``
             }`
         );
